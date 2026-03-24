@@ -31,14 +31,14 @@ DELFT_FINAL = {
     "Vitamins (mult)":     1.0,
 }
 
-# Multiplier columns in the CSV
+# Actual delivered value columns in the CSV (post-rounding back-calculation)
 MULT_COLS = {
-    "KH2PO4":              "KH2PO4_mult",
-    "NH4_2SO4":            "NH4_2SO4_mult",
-    "MgSO4":               "MgSO4_mult",
-    "Glucose":             "Glucose_mult",
-    "Trace metals (mult)": "trace_mult",
-    "Vitamins (mult)":     "vitamin_mult",
+    "KH2PO4":              "KH2PO4_conc_g_per_L",
+    "NH4_2SO4":            "NH4_2SO4_conc_g_per_L",
+    "MgSO4":               "MgSO4_conc_g_per_L",
+    "Glucose":             "Glucose_conc_g_per_L",
+    "Trace metals (mult)": "trace_actual_mult",
+    "Vitamins (mult)":     "vitamin_actual_mult",
 }
 
 # Bounds
@@ -52,7 +52,8 @@ def load_lhs(path=LHS_CSV):
     records = []
     for label, col in MULT_COLS.items():
         delft_val = DELFT_FINAL[label]
-        values    = df[col].values * delft_val  # convert multiplier → absolute value
+        # Columns are already in absolute units (g/L or multiplier) — no conversion needed
+        values = df[col].values
         records.append({
             "Compound":      label,
             "Delft":         delft_val,
@@ -70,14 +71,13 @@ def load_lhs(path=LHS_CSV):
 def load_bo_suggestions(path, df_design):
     """
     Load BO-suggested points. Expects same column names as lhs_unique_conditions.csv
-    (i.e. *_mult columns). Returns absolute values aligned to df_design compound order.
+    (conc_g_per_L for macronutrients, actual_mult for stocks).
     """
     df_bo = pd.read_csv(path)
     suggestions = {}
     for label, col in MULT_COLS.items():
         if col in df_bo.columns:
-            delft_val = DELFT_FINAL[label]
-            suggestions[label] = df_bo[col].values * delft_val
+            suggestions[label] = df_bo[col].values
     return suggestions
 
 
@@ -150,7 +150,7 @@ def plot_design_space(df_design, bo_suggestions=None, save_path=None):
         "Y. lipolytica growth rate, n=64 conditions",
         fontsize=12
     )
-    ax.set_xscale("log")
+    ax.set_xscale("linear")
     ax.grid(True, which="both", linestyle="--", linewidth=0.4, alpha=0.6)
     ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
 

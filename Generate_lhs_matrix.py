@@ -144,23 +144,37 @@ def generate_lhs_matrix(stock_conc=STOCK_CONC, verbose=True):
         row = {}
         total_vol = 0.0
         for j, compound in enumerate(compounds):
-            multiplier   = macros[i, j]
+            multiplier    = macros[i, j]
             final_g_per_l = DELFT_FINAL[compound]
-            mass_ug      = final_g_per_l * MEDIA_VOL_UL * multiplier
-            vol_ul       = mass_ug / stock_conc[compound]
-            row[f"{compound}_mult"] = round(multiplier, 4)
-            row[f"{compound}_vol_uL"] = round(vol_ul, 2)
-            total_vol += vol_ul
+            mass_ug       = final_g_per_l * MEDIA_VOL_UL * multiplier
+            vol_ul_raw    = mass_ug / stock_conc[compound]
+
+            # Round to nearest pipettable unit (1 µL floor)
+            vol_ul_rounded = max(PIPETTE_FLOOR_UL, round(vol_ul_raw))
+
+            # Back-calculate actual delivered concentration from rounded volume
+            actual_conc = (vol_ul_rounded * stock_conc[compound]) / MEDIA_VOL_UL
+
+            row[f"{compound}_lhs_mult"]     = round(multiplier, 4)   # traceability only
+            row[f"{compound}_vol_uL"]       = vol_ul_rounded          # what gets pipetted
+            row[f"{compound}_conc_g_per_L"] = round(actual_conc, 4)  # BO input
+            total_vol += vol_ul_rounded
 
         row["trace_mult"]   = trace[i]
         row["vitamin_mult"] = vitamin[i]
-        trace_vol   = TRACE_METAL_1X_VOL_UL * trace[i]
-        vitamin_vol = VITAMIN_1X_VOL_UL * vitamin[i]
-        row["trace_vol_uL"]   = round(trace_vol, 2)
-        row["vitamin_vol_uL"] = round(vitamin_vol, 2)
+        trace_vol   = max(PIPETTE_FLOOR_UL, round(TRACE_METAL_1X_VOL_UL * trace[i]))
+        vitamin_vol = max(PIPETTE_FLOOR_UL, round(VITAMIN_1X_VOL_UL * vitamin[i]))
+
+        # Back-calculate actual multiplier delivered after rounding
+        row["trace_vol_uL"]        = trace_vol
+        row["trace_actual_mult"]   = round(trace_vol / TRACE_METAL_1X_VOL_UL, 4)
+        row["vitamin_vol_uL"]      = vitamin_vol
+        row["vitamin_actual_mult"] = round(vitamin_vol / VITAMIN_1X_VOL_UL, 4)
         total_vol += trace_vol + vitamin_vol
 
-        row["milliQ_vol_uL"] = round(MEDIA_VOL_UL - total_vol, 2)
+        # MilliQ rounded to 1 µL as well
+        milliQ = round(MEDIA_VOL_UL - total_vol)
+        row["milliQ_vol_uL"]  = milliQ
         row["total_media_uL"] = MEDIA_VOL_UL
         vol_records.append(row)
 
@@ -232,6 +246,6 @@ if __name__ == "__main__":
 
         print("\nSample (first 5 unique conditions):")
         preview_cols = ["condition_id",
-                        "KH2PO4_mult", "NH4_2SO4_mult", "MgSO4_mult", "Glucose_mult",
-                        "trace_mult", "vitamin_mult", "milliQ_vol_uL"]
+                        "KH2PO4_conc_g_per_L", "NH4_2SO4_conc_g_per_L", "MgSO4_conc_g_per_L", "Glucose_conc_g_per_L",
+                        "trace_actual_mult", "vitamin_actual_mult", "milliQ_vol_uL"]
         print(df_unique[preview_cols].head().to_string(index=False))
