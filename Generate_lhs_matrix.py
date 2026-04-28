@@ -8,9 +8,10 @@ Design:
 - 300 µL media volume per well + 50 µL inoculum = 350 µL total
 - Assembly order: macronutrients → pH → trace metals → vitamins → MilliQ top-up → inoculum
 
-NOTE: Stock concentrations below are placeholders.
-      Validate against solubility limits and volume budget before use.
-      Run this script to check volume feasibility before committing to stocks.
+NOTE ON pH: pH adjustment strategy across 192 wells is unresolved pending wetlab input.
+KH2PO4 concentration varies across wells, so KOH requirement differs per well.
+Per-well titration at plate scale is impractical. Options: pre-adjust stock pH,
+or accept ~±0.2 pH variation relying on KH2PO4 buffering capacity.
 """
 
 import numpy as np
@@ -19,10 +20,10 @@ from scipy.stats import qmc
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-MEDIA_VOL_UL = 300          # µL media per well (inoculum added separately)
-N_UNIQUE     = 64           # unique LHS conditions
-N_REPLICATES = 3
-SEED         = 42
+MEDIA_VOL_UL     = 300      # µL media per well (inoculum added separately)
+N_UNIQUE         = 64       # unique LHS conditions
+N_REPLICATES     = 3
+SEED             = 42
 PIPETTE_FLOOR_UL = 1.0      # µL, FlowBot ONE minimum reliable volume
 
 # Delft final concentrations (g/L in media)
@@ -33,22 +34,43 @@ DELFT_FINAL = {
     "Glucose":  20.00,
 }
 
-# LHS bounds as multipliers of Delft (0.5x to 2.0x)
-LHS_BOUNDS = (0.5, 2.0)
-
-# Stock concentrations (g/L) — ADJUST BASED ON SOLUBILITY AND VOLUME BUDGET
-# Validate using check_volume_budget() below before finalising
-STOCK_CONC = {
-    "KH2PO4":   80.0,    # ~solubility limit at RT; confirm with wetlab
-    "NH4_2SO4": 107.0,   # well within solubility (~706 g/L)
-    "MgSO4":    7.125,   # well within solubility
-    "Glucose":  300.0,   # well within solubility (~909 g/L)
+# Per-variable bounds (g/L in final well)
+# Where bounds deviate from simple 0.5x-2.0x Delft, reason is noted.
+BOUNDS = {
+    "KH2PO4": (
+        1.00,   # Below 0.5x Delft (6.84). Literature min is 1.0 g/L across 11 Yarrowia studies.
+        27.36,  # 2x Delft. Literature max is 15.0 g/L so upper bound extends beyond literature.
+    ),
+    "NH4_2SO4": (
+        3.56,   # 0.5x Delft.
+        14.25,  # 2x Delft. Literature max is 8.0 g/L so upper bound extends beyond literature.
+    ),
+    "MgSO4": (
+        0.238,  # 0.5x Delft.
+        2.50,   # Above 2x Delft (0.950). Literature max is 2.5 g/L across 11 Yarrowia studies.
+    ),
+    "Glucose": (
+        10.00,  # 0.5x Delft.
+        40.00,  # 2x Delft. Literature goes to 80 g/L but 40 g/L chosen as biological ceiling
+                # to avoid overflow metabolism.
+    ),
 }
 
-# Trace metal and vitamin stock: prepared at 1/10th Delft recipe concentration
-# giving 6 µL addition at 1x in 300 µL well
-TRACE_METAL_1X_VOL_UL = 6.0   # µL at 1x Delft in 300 µL well
-VITAMIN_1X_VOL_UL      = 6.0   # µL at 1x Delft in 300 µL well
+# Stock concentrations (g/L)
+# Chosen so addition volumes are comfortably above the 1 µL FlowBot floor
+# across the full range defined in BOUNDS above.
+STOCK_CONC = {
+    "KH2PO4":   80.0,   # Solubility ~83 g/L at RT — confirm with wetlab before preparation
+    "NH4_2SO4": 107.0,  # Well within solubility (~706 g/L)
+    "MgSO4":    25.0,   # Increased from Delft stock (7.125 g/L) to accommodate upper bound of 2.5 g/L
+                        # while keeping addition volumes pipettable (2.86-30 µL range)
+    "Glucose":  300.0,  # Well within solubility (~909 g/L)
+}
+
+# Trace metal and vitamin stocks prepared at 1/10th Delft recipe concentration
+# so that the 1x addition volume is 6 µL (pipettable), giving a 0.5x-2x range of 3-12 µL
+TRACE_METAL_1X_VOL_UL = 6.0
+VITAMIN_1X_VOL_UL      = 6.0
 
 # Discrete levels for trace metals and vitamins
 DISCRETE_LEVELS = np.array([0.5, 1.0, 2.0])
@@ -56,166 +78,135 @@ DISCRETE_LEVELS = np.array([0.5, 1.0, 2.0])
 
 # ── Volume budget check ────────────────────────────────────────────────────────
 
-def check_volume_budget(stock_conc=STOCK_CONC, verbose=True):
+def check_volume_budget(verbose=True):
     """
-    Validates that all addition volumes are:
-    - Above the pipetting floor at 0.5x
-    - Non-negative MilliQ top-up at 2x (worst case all variables at max)
+    Validates that all addition volumes are above the pipetting floor
+    at the lower bound, and MilliQ top-up is non-negative at the upper bound
+    (worst case: all variables at max simultaneously).
     """
     results = {}
     for compound, final_g_per_l in DELFT_FINAL.items():
-        mass_ug = final_g_per_l * MEDIA_VOL_UL          # µg in one well at 1x
-        vol_1x  = mass_ug / stock_conc[compound]         # µL at 1x
-        vol_05x = vol_1x * 0.5
-        vol_2x  = vol_1x * 2.0
-        results[compound] = {"0.5x": vol_05x, "1x": vol_1x, "2x": vol_2x}
+        lo, hi = BOUNDS[compound]
+        vol_lo = (lo * MEDIA_VOL_UL) / STOCK_CONC[compound]
+        vol_1x = (final_g_per_l * MEDIA_VOL_UL) / STOCK_CONC[compound]
+        vol_hi = (hi * MEDIA_VOL_UL) / STOCK_CONC[compound]
+        results[compound] = {"lo": vol_lo, "1x": vol_1x, "hi": vol_hi,
+                             "bound_lo": lo, "bound_hi": hi}
 
-    trace_2x   = TRACE_METAL_1X_VOL_UL * 2.0
-    vitamin_2x = VITAMIN_1X_VOL_UL * 2.0
+    trace_hi   = TRACE_METAL_1X_VOL_UL * 2.0
+    vitamin_hi = VITAMIN_1X_VOL_UL * 2.0
+    total_hi   = sum(r["hi"] for r in results.values()) + trace_hi + vitamin_hi
+    milliQ_hi  = MEDIA_VOL_UL - total_hi
 
-    total_2x = sum(r["2x"] for r in results.values()) + trace_2x + vitamin_2x
-    milliQ_at_2x = MEDIA_VOL_UL - total_2x
-
-    total_1x = sum(r["1x"] for r in results.values()) + TRACE_METAL_1X_VOL_UL + VITAMIN_1X_VOL_UL
-    milliQ_at_1x = MEDIA_VOL_UL - total_1x
+    total_1x  = sum(r["1x"] for r in results.values()) + TRACE_METAL_1X_VOL_UL + VITAMIN_1X_VOL_UL
+    milliQ_1x = MEDIA_VOL_UL - total_1x
 
     if verbose:
-        print("=" * 60)
+        print("=" * 72)
         print("VOLUME BUDGET CHECK")
-        print("=" * 60)
-        print(f"{'Component':<20} {'0.5x (µL)':>10} {'1x (µL)':>10} {'2x (µL)':>10}")
-        print("-" * 55)
-        for compound, vols in results.items():
-            flag_05x = " ⚠ BELOW FLOOR" if vols["0.5x"] < PIPETTE_FLOOR_UL else ""
-            print(f"{compound:<20} {vols['0.5x']:>10.2f} {vols['1x']:>10.2f} {vols['2x']:>10.2f}{flag_05x}")
-        print(f"{'Trace metals':<20} {TRACE_METAL_1X_VOL_UL*0.5:>10.2f} {TRACE_METAL_1X_VOL_UL:>10.2f} {trace_2x:>10.2f}")
-        print(f"{'Vitamins':<20} {VITAMIN_1X_VOL_UL*0.5:>10.2f} {VITAMIN_1X_VOL_UL:>10.2f} {vitamin_2x:>10.2f}")
-        print("-" * 55)
-        print(f"{'MilliQ top-up':<20} {'':>10} {milliQ_at_1x:>10.2f} {milliQ_at_2x:>10.2f}")
+        print("=" * 72)
+        print(f"{'Component':<20} {'Bound lo':>10} {'Vol lo (µL)':>12} {'Vol 1x (µL)':>12} {'Vol hi (µL)':>12} {'Bound hi':>10}")
+        print("-" * 72)
+        for compound, r in results.items():
+            flag = " ⚠ BELOW FLOOR" if r["lo"] < PIPETTE_FLOOR_UL else ""
+            print(f"{compound:<20} {r['bound_lo']:>10.3f} {r['lo']:>12.2f} {r['1x']:>12.2f} {r['hi']:>12.2f} {r['bound_hi']:>10.3f}{flag}")
+        print(f"{'Trace metals':<20} {'0.5x':>10} {TRACE_METAL_1X_VOL_UL*0.5:>12.2f} {TRACE_METAL_1X_VOL_UL:>12.2f} {trace_hi:>12.2f} {'2x':>10}")
+        print(f"{'Vitamins':<20} {'0.5x':>10} {VITAMIN_1X_VOL_UL*0.5:>12.2f} {VITAMIN_1X_VOL_UL:>12.2f} {vitamin_hi:>12.2f} {'2x':>10}")
+        print("-" * 72)
+        print(f"{'MilliQ top-up':<20} {'':>10} {'':>12} {milliQ_1x:>12.2f} {milliQ_hi:>12.2f}")
         print()
-        if milliQ_at_2x < 0:
-            print("❌ FAIL: MilliQ volume negative at 2x — stock concentrations too low")
+        if milliQ_hi < 0:
+            print(f"❌ FAIL: MilliQ volume negative at upper bounds ({milliQ_hi:.1f} µL) — increase stock concentrations")
         else:
-            print(f"✓  MilliQ headroom at 2x (worst case): {milliQ_at_2x:.1f} µL")
-        below_floor = [c for c, v in results.items() if v["0.5x"] < PIPETTE_FLOOR_UL]
-        if below_floor:
-            print(f"❌ FAIL: Below pipetting floor at 0.5x: {below_floor}")
+            print(f"✓  MilliQ headroom at upper bounds (worst case): {milliQ_hi:.1f} µL")
+        below = [c for c, r in results.items() if r["lo"] < PIPETTE_FLOOR_UL]
+        if below:
+            print(f"❌ FAIL: Below pipetting floor at lower bound: {below}")
         else:
-            print("✓  All 0.5x additions above pipetting floor")
-        print("=" * 60)
+            print("✓  All lower bound additions above pipetting floor")
+        print("=" * 72)
 
-    return results, milliQ_at_2x
+    return results, milliQ_hi
 
 
 # ── LHS generation ─────────────────────────────────────────────────────────────
 
 def snap_to_levels(values, levels=DISCRETE_LEVELS):
-    """Snap continuous LHS values to nearest discrete level."""
     levels = np.array(levels)
     return levels[np.argmin(np.abs(values[:, None] - levels[None, :]), axis=1)]
 
 
-def generate_lhs_matrix(stock_conc=STOCK_CONC, verbose=True):
+def generate_lhs_matrix(verbose=True):
     """
-    Generate LHS design matrix.
+    Generate LHS design matrix using per-variable bounds from BOUNDS dict.
     Returns DataFrame with:
-    - multiplier columns (dimensionless, relative to Delft 1x)
-    - addition volume columns (µL per 300 µL well)
+    - LHS multiplier columns (traceability)
+    - addition volume columns (µL per well, rounded to nearest 1 µL)
+    - back-calculated actual concentration (BO input)
     - MilliQ top-up volume
-    - plate and well assignments
     """
+    compounds = list(DELFT_FINAL.keys())
+    lo_bounds = [BOUNDS[c][0] for c in compounds] + [0.5, 0.5]  # stocks use multiplier bounds
+    hi_bounds = [BOUNDS[c][1] for c in compounds] + [2.0, 2.0]
+
     sampler = qmc.LatinHypercube(d=6, seed=SEED)
     sample  = sampler.random(n=N_UNIQUE)
+    scaled  = qmc.scale(sample, l_bounds=lo_bounds, u_bounds=hi_bounds)
 
-    # Scale to 0.5x–2.0x bounds
-    lo, hi = LHS_BOUNDS
-    scaled = qmc.scale(sample, l_bounds=[lo]*6, u_bounds=[hi]*6)
+    macros       = scaled[:, :4]   # g/L directly (bounds are in g/L)
+    trace_mults  = snap_to_levels(scaled[:, 4])
+    vitamin_mults = snap_to_levels(scaled[:, 5])
 
-    # Columns: KH2PO4, NH4_2SO4, MgSO4, Glucose (continuous), trace, vitamin (discrete)
-    macros  = scaled[:, :4]
-    trace   = snap_to_levels(scaled[:, 4])
-    vitamin = snap_to_levels(scaled[:, 5])
-
-    compounds = list(DELFT_FINAL.keys())
-
-    # Compute addition volumes (µL)
     vol_records = []
     for i in range(N_UNIQUE):
         row = {}
         total_vol = 0.0
         for j, compound in enumerate(compounds):
-            multiplier    = macros[i, j]
-            final_g_per_l = DELFT_FINAL[compound]
-            mass_ug       = final_g_per_l * MEDIA_VOL_UL * multiplier
-            vol_ul_raw    = mass_ug / stock_conc[compound]
-
-            # Round to nearest pipettable unit (1 µL floor)
+            target_conc   = macros[i, j]           # g/L in final well
+            vol_ul_raw    = (target_conc * MEDIA_VOL_UL) / STOCK_CONC[compound]
             vol_ul_rounded = max(PIPETTE_FLOOR_UL, round(vol_ul_raw))
+            actual_conc   = (vol_ul_rounded * STOCK_CONC[compound]) / MEDIA_VOL_UL
 
-            # Back-calculate actual delivered concentration from rounded volume
-            actual_conc = (vol_ul_rounded * stock_conc[compound]) / MEDIA_VOL_UL
-
-            row[f"{compound}_lhs_mult"]     = round(multiplier, 4)   # traceability only
-            row[f"{compound}_vol_uL"]       = vol_ul_rounded          # what gets pipetted
-            row[f"{compound}_conc_g_per_L"] = round(actual_conc, 4)  # BO input
+            row[f"{compound}_target_g_per_L"]  = round(target_conc, 4)   # LHS suggestion
+            row[f"{compound}_vol_uL"]          = vol_ul_rounded           # what gets pipetted
+            row[f"{compound}_conc_g_per_L"]    = round(actual_conc, 4)   # BO input
             total_vol += vol_ul_rounded
 
-        row["trace_mult"]   = trace[i]
-        row["vitamin_mult"] = vitamin[i]
-        trace_vol   = max(PIPETTE_FLOOR_UL, round(TRACE_METAL_1X_VOL_UL * trace[i]))
-        vitamin_vol = max(PIPETTE_FLOOR_UL, round(VITAMIN_1X_VOL_UL * vitamin[i]))
-
-        # Back-calculate actual multiplier delivered after rounding
-        row["trace_vol_uL"]        = trace_vol
-        row["trace_actual_mult"]   = round(trace_vol / TRACE_METAL_1X_VOL_UL, 4)
+        row["trace_mult"]        = trace_mults[i]
+        row["vitamin_mult"]      = vitamin_mults[i]
+        trace_vol   = max(PIPETTE_FLOOR_UL, round(TRACE_METAL_1X_VOL_UL * trace_mults[i]))
+        vitamin_vol = max(PIPETTE_FLOOR_UL, round(VITAMIN_1X_VOL_UL * vitamin_mults[i]))
+        row["trace_vol_uL"]      = trace_vol
+        row["trace_actual_mult"] = round(trace_vol / TRACE_METAL_1X_VOL_UL, 4)
         row["vitamin_vol_uL"]      = vitamin_vol
         row["vitamin_actual_mult"] = round(vitamin_vol / VITAMIN_1X_VOL_UL, 4)
         total_vol += trace_vol + vitamin_vol
 
-        # MilliQ rounded to 1 µL as well
-        milliQ = round(MEDIA_VOL_UL - total_vol)
-        row["milliQ_vol_uL"]  = milliQ
+        row["milliQ_vol_uL"]  = round(MEDIA_VOL_UL - total_vol)
         row["total_media_uL"] = MEDIA_VOL_UL
         vol_records.append(row)
 
     df = pd.DataFrame(vol_records)
     df.insert(0, "condition_id", range(1, N_UNIQUE + 1))
 
-    # Validate no negative MilliQ
-    neg_milliQ = df[df["milliQ_vol_uL"] < 0]
-    if not neg_milliQ.empty:
-        print(f"❌ WARNING: {len(neg_milliQ)} conditions have negative MilliQ volume.")
-        print("   Increase stock concentrations or reduce upper bound.")
-
-    below_floor = {}
-    for compound in compounds:
-        col = f"{compound}_vol_uL"
-        bad = df[df[col] < PIPETTE_FLOOR_UL]
-        if not bad.empty:
-            below_floor[compound] = len(bad)
-    if below_floor:
-        print(f"❌ WARNING: Conditions below pipetting floor: {below_floor}")
+    neg = df[df["milliQ_vol_uL"] < 0]
+    if not neg.empty:
+        print(f"❌ WARNING: {len(neg)} conditions have negative MilliQ volume.")
 
     return df
 
 
 def assign_plates_and_wells(df, n_replicates=N_REPLICATES):
-    """
-    Expand unique conditions to triplicates and assign plate/well positions.
-    Randomises well order to avoid positional bias.
-    """
     expanded = pd.concat([df] * n_replicates, ignore_index=True)
     expanded["replicate"] = np.tile(np.arange(1, n_replicates + 1), len(df))
     expanded = expanded.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
-    # Assign plate and well
     rows_96 = list("ABCDEFGH")
     cols_96 = list(range(1, 13))
-    wells = [f"{r}{c}" for r in rows_96 for c in cols_96]
+    wells   = [f"{r}{c}" for r in rows_96 for c in cols_96]
 
     expanded["plate"] = [(i // 96) + 1 for i in range(len(expanded))]
     expanded["well"]  = [wells[i % 96] for i in range(len(expanded))]
-
     return expanded
 
 
@@ -226,26 +217,24 @@ if __name__ == "__main__":
     _, milliQ_headroom = check_volume_budget()
 
     if milliQ_headroom < 0:
-        print("\nHalt: Fix stock concentrations before generating matrix.")
+        print("\nHalt: Fix stock concentrations or bounds before generating matrix.")
     else:
         print("\nStep 2: Generating LHS matrix")
         df_unique = generate_lhs_matrix()
-        print(f"Generated {len(df_unique)} unique conditions")
+
+        # Check uniqueness after rounding
+        conc_cols = [f"{c}_conc_g_per_L" for c in DELFT_FINAL] + ["trace_actual_mult", "vitamin_actual_mult"]
+        n_unique_actual = df_unique[conc_cols].drop_duplicates().shape[0]
+        print(f"Generated {len(df_unique)} conditions, {n_unique_actual} unique after rounding")
+        for col in conc_cols:
+            vals = df_unique[col].values
+            print(f"  {col}: {len(set(vals))} unique values, range {vals.min():.3f}–{vals.max():.3f}")
 
         print("\nStep 3: Assigning plates and wells")
         df_full = assign_plates_and_wells(df_unique)
         print(f"Total wells: {len(df_full)} ({N_UNIQUE} conditions × {N_REPLICATES} replicates)")
         print(f"Plates required: {df_full['plate'].max()}")
 
-        # Save outputs
         df_unique.to_csv("lhs_unique_conditions.csv", index=False)
         df_full.to_csv("lhs_full_plate_layout.csv", index=False)
-        print("\nSaved:")
-        print("  lhs_unique_conditions.csv  — 64 unique conditions with volumes")
-        print("  lhs_full_plate_layout.csv  — 192 wells with plate/well assignments")
-
-        print("\nSample (first 5 unique conditions):")
-        preview_cols = ["condition_id",
-                        "KH2PO4_conc_g_per_L", "NH4_2SO4_conc_g_per_L", "MgSO4_conc_g_per_L", "Glucose_conc_g_per_L",
-                        "trace_actual_mult", "vitamin_actual_mult", "milliQ_vol_uL"]
-        print(df_unique[preview_cols].head().to_string(index=False))
+        print("\nSaved: lhs_unique_conditions.csv, lhs_full_plate_layout.csv")
