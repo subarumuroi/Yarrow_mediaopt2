@@ -2,9 +2,11 @@
 Generate LHS media matrix in ProgrammaticPipetting.jl input format.
 
 Output: Excel file with:
-- Main sheet: 6 compound rows x 65 columns (1_Control + 64 LHS conditions)
+- Main sheet: 6 compound rows x N conditions (one control + generated LHS)
 - Constraints sheet: compound rows with placeholder pipette/solubility values
 - Miscellaneous sheet: max volume and iteration count
+
+This script generates one control and the final LHS conditions; plate-specific sample layouts for 2x and 3x 24-well plates should be handled manually.
 
 Compound rows:
 1. KH2PO4 (macronutrient)
@@ -69,9 +71,9 @@ BOUNDS = {
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-N_CONDITIONS = 511
+N_CONDITIONS = 21  # number of generated LHS conditions to output; plate/control layout is applied manually
 SEED         = 42
-TOTAL_VOL_UL = 350
+TOTAL_VOL_UL = 3500
 MAX_ITER     = 40
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -145,25 +147,12 @@ def generate_matrix(output_path: str = "media_matrix.xlsx"):
         "lhs": df_lhs["Vitamins"].values,
     })
 
-    # ── Build Main sheet dataframe ────────────────────────────────────────────
-
-    condition_cols = ["1_Control"] + list(range(2, N_CONDITIONS + 2))
-    main_cols = ["Compound", "ShorthandName", "PubChemCID"] + condition_cols
+    # ── Build Main sheet column layout ───────────────────────────────────────
+    # Output one control and the generated LHS conditions; plate-specific layouts are handled manually.
+    condition_cols = ["1_Control"] + [str(i) for i in range(2, N_CONDITIONS + 2)]
+    all_main_cols = ["Compound", "ShorthandName", "PubChemCID"] + condition_cols
 
     shorthands = list("ABCDEF")
-    main_rows = []
-    for idx, r in enumerate(rows):
-        row_data = {
-            "Compound":      r["compound"],
-            "ShorthandName": shorthands[idx],
-            "PubChemCID":    None,   # not fetched automatically — fill manually if needed
-            "1_Control":     r["delft"],
-        }
-        for i, val in enumerate(r["lhs"]):
-            row_data[i + 2] = val
-        main_rows.append(row_data)
-
-    df_main = pd.DataFrame(main_rows, columns=main_cols)
 
     # ── Build Constraints sheet ───────────────────────────────────────────────
 
@@ -207,7 +196,14 @@ def generate_matrix(output_path: str = "media_matrix.xlsx"):
 
     ws_main = wb.active
     ws_main.title = "Main"
-    write_sheet(ws_main, df_main)
+    for col_idx, col_name in enumerate(all_main_cols, 1):
+        cell = ws_main.cell(row=1, column=col_idx, value=str(col_name))
+        cell.font = base_font
+    for row_idx, (idx, r) in enumerate(enumerate(rows)):
+        values = [r["compound"], shorthands[idx], None, r["delft"]] + list(r["lhs"])
+        for col_idx, val in enumerate(values, 1):
+            cell = ws_main.cell(row=row_idx + 2, column=col_idx, value=val)
+            cell.font = base_font
 
     ws_con = wb.create_sheet("Constraints")
     write_sheet(ws_con, df_constraints)
@@ -217,9 +213,9 @@ def generate_matrix(output_path: str = "media_matrix.xlsx"):
 
     wb.save(output_path)
     print(f"Saved: {output_path}")
-    print(f"  Main sheet: {len(rows)} compound rows x {len(condition_cols) + 2} columns")
+    print(f"  Main sheet: {len(rows)} compound rows x {len(all_main_cols)} columns")
     print(f"  Conditions: 1 control + {N_CONDITIONS} LHS")
-    print()
+    print()  # columns: 1_Control, 2..{N_CONDITIONS + 1}
     print("Compound rows:")
     for r in rows:
         print(f"  {r['shorthand']}: {r['compound'][:80]}...")
