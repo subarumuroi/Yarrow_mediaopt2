@@ -73,7 +73,7 @@ BOUNDS = {
 
 N_CONDITIONS = 21  # number of generated LHS conditions to output; plate/control layout is applied manually
 SEED         = 42
-TOTAL_VOL_UL = 3500
+TOTAL_VOL_UL = 2500
 MAX_ITER     = 40
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
